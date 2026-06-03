@@ -1,0 +1,14 @@
+{
+    "name": "atlasfuturo/review-tools",
+    "description": "Isolated PHP QA tooling for the silent review loop (not part of any theme).",
+    "require-dev": {
+        "squizlabs/php_codesniffer": "^3.10",
+        "wp-coding-standards/wpcs": "^3.1",
+        "phpcompatibility/phpcompatibility-wp": "^2.1"
+    },
+    "config": {
+        "allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": true
+        }
+    }
+}

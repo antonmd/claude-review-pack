@@ -1,0 +1,54 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "findings"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["approve", "request_changes"],
+      "description": "approve = changes are sound; request_changes = at least one real issue worth fixing."
+    },
+    "summary": {
+      "type": "string",
+      "description": "One or two sentences on the overall assessment of the changed files."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Specific issues. Empty when verdict is approve.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "line", "severity", "confidence", "message", "suggestion"],
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Path of the file the finding applies to."
+          },
+          "line": {
+            "type": ["integer", "null"],
+            "description": "1-based line number, or null if not line-specific."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["blocker", "major", "minor", "nit"],
+            "description": "blocker = security/breakage; major = real bug or violation of project rules; minor = should fix; nit = optional polish."
+          },
+          "confidence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+            "description": "How certain you are this is a real issue (5 = certain)."
+          },
+          "message": {
+            "type": "string",
+            "description": "What the issue is and why it matters."
+          },
+          "suggestion": {
+            "type": ["string", "null"],
+            "description": "Concrete fix, or null if none."
+          }
+        }
+      }
+    }
+  }
+}

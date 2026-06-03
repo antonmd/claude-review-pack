@@ -1,0 +1,9 @@
+{
+  "name": "atlasfuturo-review-tools",
+  "private": true,
+  "description": "Isolated CSS/SCSS QA tooling for the silent review loop.",
+  "devDependencies": {
+    "stylelint": "^16.9.0",
+    "stylelint-config-standard-scss": "^13.1.0"
+  }
+}

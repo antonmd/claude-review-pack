@@ -1,0 +1,32 @@
+# This repo tracks ONLY the Claude review tooling + settings (.claude/).
+# Everything else in the project is ignored.
+
+# --- Ignore everything by default ---
+/*
+
+# --- ...then re-include just what we want to track ---
+!.gitignore
+!.claude/
+
+# --- Within .claude/, exclude heavy / generated / transient bits ---
+# Vendored dependencies (reinstall from manifests: composer.json / package.json)
+.claude/review/tools/vendor/
+.claude/review/tools/node_modules/
+
+# Transient review runtime state + logs
+.claude/.review-state/
+.claude/review/**/*.log
+
+# Local/secret settings (keep shared settings.json; ignore personal overrides)
+.claude/settings.local.json
+
+# Upstream-feedback / critique docs — kept local, shared privately, not published
+.claude/review/FEEDBACK_FOR_TDD_DEV.md
+.claude/review/ADOPTER_REPORT.md
+.claude/review/UPSTREAM_FEEDBACK.md
+.claude/review/ADDENDUM_v2.1.md
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+*~

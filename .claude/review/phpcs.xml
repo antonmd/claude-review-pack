@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<ruleset name="atlasfuturo-review">
+    <description>
+        Security + correctness focused WordPress Coding Standards subset for the
+        silent review loop. Whitespace/comment/Yoda/filename sniffs are muted so
+        the grounding signal Codex receives is high-value (escaping, sanitization,
+        nonce checks, PHP correctness, PHP version compatibility).
+    </description>
+
+    <rule ref="WordPress-Extra">
+        <!-- Pure formatting noise — Codex judges style holistically instead. -->
+        <exclude name="WordPress.WhiteSpace"/>
+        <exclude name="Generic.WhiteSpace"/>
+        <exclude name="Universal.WhiteSpace"/>
+        <exclude name="PEAR.Functions.FunctionCallSignature"/>
+        <exclude name="WordPress.Arrays.ArrayDeclarationSpacing"/>
+        <exclude name="WordPress.Arrays.ArrayKeySpacingRestrictions"/>
+        <exclude name="WordPress.Arrays.MultipleStatementAlignment"/>
+        <exclude name="WordPress.PHP.YodaConditions"/>
+        <exclude name="Squiz.Commenting"/>
+        <exclude name="Generic.Commenting"/>
+        <exclude name="WordPress.Files.FileName"/>
+        <exclude name="Generic.Files.LineLength"/>
+    </rule>
+
+    <!-- Flag PHP features newer than the supported floor. -->
+    <rule ref="PHPCompatibilityWP"/>
+    <config name="testVersion" value="8.0-"/>
+</ruleset>
