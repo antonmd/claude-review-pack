@@ -7,6 +7,9 @@
 # --- ...then re-include just what we want to track ---
 !.gitignore
 !.claude/
+!README.md
+!LICENSE
+!NOTICE
 
 # --- Within .claude/, exclude heavy / generated / transient bits ---
 # Vendored dependencies (reinstall from manifests: composer.json / package.json)
