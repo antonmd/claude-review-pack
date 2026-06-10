@@ -5,7 +5,12 @@
 # infinite Claude<->Codex loops). Each round is one Codex review.
 REVIEW_MAX_ROUNDS="${REVIEW_MAX_ROUNDS:-4}"
 
-# Codex model. Empty = whatever `codex` is configured to use by default.
+# Codex model. Empty (default) = omit --model entirely and let Codex CLI pick
+# its own default. KEEP THIS EMPTY. Pinning a slug (gpt-5.x, *-codex, …) goes
+# stale fast: upstream go-tdd-pack shipped three model-pin hotfixes in ten days
+# before v2.3.2 reverted to "no pin, ever" (omit the flag, trust the CLI default).
+# Set a slug only for a deliberate, temporary override — stop-gate.sh adds -m
+# only when this is non-empty.
 REVIEW_CODEX_MODEL="${REVIEW_CODEX_MODEL:-}"
 
 # Hard timeout (seconds) for a single Codex review call. On timeout we fail open.
