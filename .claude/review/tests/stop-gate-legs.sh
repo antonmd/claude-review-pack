@@ -410,13 +410,13 @@ self_rows() {
     rep 1 SELF-4 "[0-9] matches an Arabic-Indic digit under en_US.UTF-8" \
         "$(env -i LANG=en_US.UTF-8 bash -c '[[ ٣ =~ [0-9] ]]' >/dev/null 2>&1 && echo 1 || echo 0)"
     # SELF-5: a caller's REVIEW_DISABLE=1 does not reach the hook (env -i isolation).
-    # Baseline-safe: assert a reviewer CLI ran at all (codex on baseline, grok on
-    # the new code). A leaked REVIEW_DISABLE would exit the hook before any call.
+    # It checks the HARNESS only: the hook is replaced by a probe that records what
+    # it sees, so a wrong product (one that never calls a reviewer) cannot fail it.
     T="$(mkproj)" || exit 2
+    printf '%s\n' 'printf "%s" "${REVIEW_DISABLE-unset}" > "$HOME/disable.seen"' > "$T/.claude/review/stop-gate.sh"
     ( export REVIEW_DISABLE=1; run_hook "$T" )
-    local nrev
-    nrev=$(( $(ncalls claude "$T/calls") + $(ncalls grok "$T/calls") + $(ncalls agy "$T/calls") + $(ncalls codex "$T/calls") ))
-    rep 1 SELF-5 "a caller's REVIEW_DISABLE=1 does not reach the hook" "$(bool test "$nrev" -ge 1)"
+    rep 1 SELF-5 "a caller's REVIEW_DISABLE=1 does not reach the hook" "$(bool test "$(cat "$T/disable.seen" 2>/dev/null)" = unset)"
+    rm -rf "$T"
     # SELF-6: the parser-input table is complete
     rep 1 SELF-6 "the 70 parser inputs exist" "$(bool test "$NCASES" = 70)"
     # SELF-7: the run_hook system PATH (/usr/bin:/bin) must NOT contain a real
