@@ -55,7 +55,7 @@ On **Stop**, the gate:
    `--add-dir` — it can still write **inside** that dir (see Known limitations).
    The whole review shares one time budget (`REVIEW_TIMEOUT`, default 540s)
    split across the installed legs, so a hung leg cannot eat the turn.
-4. **Decides**: either seat blocks the turn when it returns `request_changes` with a **major/blocker** finding at confidence ≥ `REVIEW_MIN_CONFIDENCE`
+4. **Decides**: either seat blocks the turn when it returns `request_changes` with a finding at or above `REVIEW_BLOCK_SEVERITY` (default **major**: major/blocker) at confidence ≥ `REVIEW_MIN_CONFIDENCE`
    (a seat that approves does not block, whatever it lists); `verdict.json` holds both seats' findings. Findings are injected back for Claude to fix, up to
    `REVIEW_MAX_ROUNDS`. Lower-severity/low-confidence findings are shown once,
    never looped.
@@ -143,7 +143,7 @@ grounding. Grounding tools are optional and degrade gracefully.
 - **The claude leg uses your Claude login and quota.** It is a nested
   `claude -p` session: it reads your repository, spends your plan usage, and
   fails when that login is out of usage: then grok, then agy, fills seat 1; if
-  neither can, seat 1 stays empty and the note says only one reviewer ran.
+  neither can, seat 1 stays empty and the note says only one reviewer ran; if seat 2 is empty too, the note says no reviewer could run.
 - **Leg availability is not probed up front.** An installed-but-out-of-quota leg
   is discovered by trying it; its bounded share of `REVIEW_TIMEOUT` is spent
   before the next leg runs. Each leg's share is the time left divided by the legs

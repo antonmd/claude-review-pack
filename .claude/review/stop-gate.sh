@@ -56,14 +56,17 @@ if ! rm -f "$STATE_DIR"/claude.out "$STATE_DIR"/claude.err \
     note "⚠️ Second-opinion review cannot clear review state — skipping this turn."
 fi
 # Raw leg output stays PRIVATE until the turn ends: it is written outside the repo,
-# so a later seat cannot read an earlier seat's answer while it reviews. When the
-# hook exits, the files move into the review-state folder (for debugging) and the
-# private folder is removed.
+# and each finished leg's files are locked (mode 000, see attempt()), so a later
+# seat cannot read an earlier seat's answer while it reviews. When the hook exits,
+# the files are unlocked and move into the review-state folder (for debugging),
+# and the private folder is removed.
 if ! LEG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/review-legs.XXXXXX" 2>/dev/null)" || [ ! -d "$LEG_DIR" ]; then
     review_log "cannot create the private leg folder; failing open"
     note "⚠️ Second-opinion review cannot create its private work folder — skipping this turn."
 fi
-trap 'mv -f "$LEG_DIR"/* "$STATE_DIR"/ 2>/dev/null; rm -rf "$LEG_DIR"' EXIT
+# Absolute: leg_claude changes to the repo root before it writes into the folder.
+case "$LEG_DIR" in /*) ;; *) LEG_DIR="$PWD/$LEG_DIR" ;; esac
+trap 'chmod 600 "$LEG_DIR"/* 2>/dev/null; mv -f "$LEG_DIR"/* "$STATE_DIR"/ 2>/dev/null; rm -rf "$LEG_DIR"' EXIT
 
 # --- Resolve the time budget (seconds), guarded ------------------------------
 # Accept only 1–4 ASCII digits in 30..540; anything else → 540. The explicit
@@ -342,8 +345,20 @@ reasons=()
 SEAT_LEG=("" ""); SEAT_V=("" "")
 untried=$n_installed
 # SHARE stays GLOBAL: leg_cat_limit reads it for the catalogue limit.
+# Lock every raw file in the private folder (mode 000). The later legs' tools are
+# read-only (claude Read/Grep/Glob, grok read_file/grep/list_dir, agy --sandbox,
+# codex -s read-only), so they cannot change a mode back. File modes do not bind
+# root.
+lock_leg_files() {
+    local f
+    for f in "$LEG_DIR"/*; do
+        [ -e "$f" ] || continue
+        chmod 000 "$f" 2>/dev/null || return 1
+    done
+    return 0
+}
 attempt() {   # attempt <leg> <seat 0|1> → on a valid verdict fills SEAT_LEG/SEAT_V
-    local leg="$1" seat="$2" m=25 wall v div
+    local leg="$1" seat="$2" m=25 wall v div lrc
     case "$leg" in claude|codex) m=15 ;; esac
     wall=$((GDEADLINE - SECONDS))
     div=$untried; [ "$div" -lt 1 ] && div=1
@@ -356,7 +371,13 @@ attempt() {   # attempt <leg> <seat 0|1> → on a valid verdict fills SEAT_LEG/S
     fi
     LEG_DEADLINE=$((SECONDS + SHARE)); LEG_TEXT=""; LEG_REASON=""
     review_log "round $((round + 1)): reviewing ${#FILES[@]} file(s) via $leg (share ${SHARE}s)"
-    if "leg_$leg"; then
+    "leg_$leg"; lrc=$?
+    # Lock this leg's answer before any later leg starts.
+    if ! lock_leg_files; then
+        review_log "cannot lock $leg's raw files; failing open"
+        note "⚠️ Second-opinion review cannot lock a reviewer's raw files — skipping this turn."
+    fi
+    if [ "$lrc" -eq 0 ]; then
         v="$(parse_one "$LEG_TEXT")"
         if [ -n "$v" ]; then SEAT_LEG[seat]="$leg"; SEAT_V[seat]="$v"; return 0; fi
         reasons+=("$leg: invalid verdict"); review_log "$leg: invalid verdict"
@@ -399,17 +420,6 @@ VALID_VERDICT_JSON="$(for s in "${filled[@]}"; do
         summary: (map(.leg + ": " + (.summary // "ok")) | join(" | ")),
         findings: (map(.findings // []) | add // [])
     }' 2>/dev/null)"
-# Save it atomically (temp + rename) so verdict.json is never torn. If the save
-# FAILS, fail OPEN right here — do NOT advance the round or block the turn, or the
-# next round's verify-only prompt would read a stale/absent verdict.
-if [ -n "$VALID_VERDICT_JSON" ] && printf '%s' "$VALID_VERDICT_JSON" | jq -c . >"$OUT.tmp" 2>/dev/null \
-        && mv -f "$OUT.tmp" "$OUT" 2>/dev/null && [ -f "$OUT" ]; then
-    :
-else
-    rm -f "$OUT.tmp" 2>/dev/null
-    review_log "cannot save verdict.json; failing open"
-    note "⚠️ Second-opinion review could not save its verdict — skipping this turn."
-fi
 verdict="$(printf '%s' "$VALID_VERDICT_JSON" | jq -r '.verdict // "approve"')"
 block_rank="$(severity_rank "$REVIEW_BLOCK_SEVERITY")"
 # A seat blocks when it says request_changes with a finding at/above the block
@@ -427,6 +437,13 @@ for s in "${filled[@]}"; do
     [ "$sv" = request_changes ] && [ "${sr:-0}" -ge "$block_rank" ] && blocking+=("$s")
 done
 
+# Build the whole block decision FIRST, every part checked: if any part cannot be
+# built, fail open before verdict.json or the round changes.
+decfail() {
+    review_log "cannot build the block decision; failing open"
+    note "⚠️ Second-opinion review could not build its decision — skipping this turn."
+}
+dec=""
 if [ "${#blocking[@]}" -gt 0 ]; then
     round=$((round + 1))
     reason=""
@@ -438,17 +455,27 @@ if [ "${#blocking[@]}" -gt 0 ]; then
                   (if .line then ":\(.line)" else "" end) +
                   " — \(.message)" +
                   (if .suggestion and .suggestion != "" then "\n  ↳ _\(.suggestion)_" else "" end)
-              ] | join("\n") )')"
+              ] | join("\n") )')" || sec=""
+        [ -n "$sec" ] || decfail
         reason="${reason:+$reason$'\n\n'}$sec"
     done
     reason="$reason"$'\n\n'"Address the blocker/major items above, then finish. (Round $round of $REVIEW_MAX_ROUNDS.)"
-    # By stdin: two seats' findings can pass one argument's 128 KiB limit. Build the
-    # decision BEFORE advancing the round; if it cannot be built, fail open.
-    dec="$(printf '%s' "$reason" | jq -Rs '{decision:"block", reason:.}' 2>/dev/null)"
-    if [ -z "$dec" ]; then
-        review_log "cannot build the block decision; failing open"
-        note "⚠️ Second-opinion review could not build its decision — skipping this turn."
-    fi
+    # By stdin: two seats' findings can pass one argument's 128 KiB limit.
+    dec="$(printf '%s' "$reason" | jq -Rs '{decision:"block", reason:.}' 2>/dev/null)" || dec=""
+    [ -n "$dec" ] || decfail
+fi
+# Save it atomically (temp + rename) so verdict.json is never torn. If the save
+# FAILS, fail OPEN right here — do NOT advance the round or block the turn, or the
+# next round's verify-only prompt would read a stale/absent verdict.
+if [ -n "$VALID_VERDICT_JSON" ] && printf '%s' "$VALID_VERDICT_JSON" | jq -c . >"$OUT.tmp" 2>/dev/null \
+        && mv -f "$OUT.tmp" "$OUT" 2>/dev/null && [ -f "$OUT" ]; then
+    :
+else
+    rm -f "$OUT.tmp" 2>/dev/null
+    review_log "cannot save verdict.json; failing open"
+    note "⚠️ Second-opinion review could not save its verdict — skipping this turn."
+fi
+if [ "${#blocking[@]}" -gt 0 ]; then
     echo "$round" >"$ROUND_FILE"
     review_log "round $round: request_changes via $legs — blocking"
     emit "$dec"

@@ -165,6 +165,12 @@ cat > "$T/$name.stdin.$i"
 pwd > "$T/$name.cwd.$i"
 # any claude raw answer file ANYWHERE in the repo when this call starts (seat isolation, L-PRIVATE)
 find "$T" \( -name claude.out -o -name claude.err \) -print > "$T/$name.peek.$i" 2>/dev/null
+# claude's raw files in the hook's private folder under $TMPDIR: how many names a
+# reader sees there, and how many bytes it can read from them (L-PRIVATE)
+if [ -n "${TMPDIR-}" ]; then
+    ls "$TMPDIR"/review-legs.*/ 2>/dev/null | grep -c '^claude\.' > "$T/$name.tnames.$i"
+    cat "$TMPDIR"/review-legs.*/claude.out "$TMPDIR"/review-legs.*/claude.err 2>/dev/null | wc -c > "$T/$name.tbytes.$i"
+fi
 
 # the env the hook passed this call
 printf 'REVIEW_DISABLE=%s GROK_CLAUDE_AGENTS_ENABLED=%s GROK_CLAUDE_SKILLS_ENABLED=%s GROK_CLAUDE_MCPS_ENABLED=%s GROK_CLAUDE_HOOKS_ENABLED=%s\n' \
@@ -419,6 +425,11 @@ self_rows() {
     rm -rf "$T"
     # SELF-6: the parser-input table is complete
     rep 1 SELF-6 "the 70 parser inputs exist" "$(bool test "$NCASES" = 70)"
+    # SELF-9: L-PRIVATE relies on file modes, which root ignores; a mode-000 file
+    # made here must be unreadable to this user (no product code involved).
+    local m; m="$(mktemp -p "$HARNESS_TMP")" || exit 2; printf 'x' > "$m"; chmod 000 "$m"
+    rep 1 SELF-9 "file modes apply to the harness user (a mode-000 file is unreadable)" "$(bool test "$(cat "$m" 2>/dev/null)" = "")"
+    chmod 600 "$m"; rm -f "$m"
     # SELF-7: the run_hook system PATH (/usr/bin:/bin) must NOT contain a real
     # reviewer, or a row that removes a stub would run the real tool instead of
     # exercising absence. grok/agy/codex live in ~/.local/bin or ~/.nvm, not here.
@@ -914,13 +925,29 @@ leg_rows() {
   fi
   if sel L-PRIVATE; then
     # Seat isolation: while codex (seat 2) runs, claude's (seat 1) raw answer must
-    # not be ANYWHERE in the repo; the files land in the review-state folder when the
-    # hook ends, and the private per-turn folder (TMPDIR, outside the repo) is removed.
+    # not be ANYWHERE in the repo, and its files in the private per-turn folder
+    # (TMPDIR, outside the repo; codex is told that folder in its -o path) must be
+    # unreadable; the files land, readable, in the review-state folder when the hook
+    # ends, and the private folder is removed.
     T="$(mkproj)" || exit 2; tp="$(mktemp -d -p "$HARNESS_TMP")" || exit 2; run_hook "$T" TMPDIR="$tp"
     rep 0 L-PRIVATE "codex ran once" "$(bool test "$(ncalls codex "$T/calls")" = 1)"
     rep 0 L-PRIVATE "at codex's start: no claude.out/claude.err anywhere in the repo" "$(bool test -f "$T/codex.peek.1" -a ! -s "$T/codex.peek.1")"
+    rep 0 L-PRIVATE "at codex's start: claude's raw files are in the private folder" "$(bool test "$(cat "$T/codex.tnames.1" 2>/dev/null)" = 2)"
+    rep 0 L-PRIVATE "at codex's start: they cannot be read (0 bytes)" "$(bool test "$(cat "$T/codex.tbytes.1" 2>/dev/null)" = 0)"
     rep 0 L-PRIVATE "after the hook: claude.out and codex.out in the review-state folder" "$(bool test -s "$(STATE "$T")/claude.out" -a -s "$(STATE "$T")/codex.out")"
+    rep 0 L-PRIVATE "after the hook: they are readable again" "$(bool test -r "$(STATE "$T")/claude.out" -a -r "$(STATE "$T")/claude.err" -a -r "$(STATE "$T")/codex.out")"
     rep 0 L-PRIVATE "the private per-turn folder is removed" "$(bool test -z "$(ls -A "$tp" 2>/dev/null)")"; rm -rf "$T" "$tp"
+  fi
+  if sel L-LOCKFAIL; then
+    # Locking claude's raw files fails (a PATH-shadowed chmod refuses mode 000): fail
+    # OPEN before codex can read them, and leave verdict.json alone.
+    T="$(mkproj)" || exit 2; seed_out "$T" '{"verdict":"approve","summary":"SEED","findings":[]}'; cp "$(OUTF "$T")" "$T/seed.json"
+    printf '#!/usr/bin/env bash\ncase " $* " in *" 000 "*) exit 1 ;; esac\nexec /bin/chmod "$@"\n' > "$T/bin/chmod"; chmod +x "$T/bin/chmod"
+    run_hook "$T"
+    rep 0 L-LOCKFAIL "fail-open note" "$(has "$SM" "cannot lock a reviewer's raw files")"
+    rep 0 L-LOCKFAIL "turn not blocked" "$(bool test -z "$DEC")"
+    rep 0 L-LOCKFAIL "codex not called" "$(bool test "$(ncalls_safe codex "$T/calls")" = 0)"
+    rep 0 L-LOCKFAIL "verdict.json byte-identical" "$(bool cmp -s "$(OUTF "$T")" "$T/seed.json")"; rm -rf "$T"
   fi
   if sel L-CLRFAIL; then
     T="$(mkproj)" || exit 2; mkdir -p "$(STATE "$T")/codex.out"
@@ -946,6 +973,16 @@ leg_rows() {
     rep 0 L-LEGDIRFAIL "no reviewer called" "$(bool test "$(( $(ncalls_safe claude "$T/calls") + $(ncalls_safe grok "$T/calls") + $(ncalls_safe agy "$T/calls") + $(ncalls_safe codex "$T/calls") ))" = 0)"
     rep 0 L-LEGDIRFAIL "verdict.json byte-identical" "$(bool cmp -s "$(OUTF "$T")" "$T/seed.json")"; rm -rf "$T"
   fi
+  if sel L-RELTMP; then
+    # A relative TMPDIR, the hook started outside the repo: the private folder must
+    # still be found after leg_claude changes to the repo root, so claude runs.
+    T="$(mkproj)" || exit 2; tp="$(mktemp -d -p "$HARNESS_TMP")" || exit 2; mkdir "$tp/rel" || exit 2
+    pushd "$tp" >/dev/null || exit 2; run_hook "$T" TMPDIR=rel; popd >/dev/null || exit 2
+    rep 0 L-RELTMP "claude ran once" "$(bool test "$(ncalls_safe claude "$T/calls")" = 1)"
+    rep 0 L-RELTMP "claude review passed" "$(has "$SM" "✅ claude review passed")"
+    rep 0 L-RELTMP "claude.out in the review-state folder" "$(bool test -s "$(STATE "$T")/claude.out")"
+    rep 0 L-RELTMP "the private folder is removed" "$(bool test -z "$(ls -A "$tp/rel" 2>/dev/null)")"; rm -rf "$T" "$tp"
+  fi
   if sel L-BIGREASON; then
     # Two blocking seats with ~70 KB findings each: the block reason passes one
     # argument's 128 KiB limit (MAX_ARG_STRLEN), so it must reach jq by stdin.
@@ -955,6 +992,7 @@ leg_rows() {
     echo "textfile=$T/b1.json" > "$T/claude.scn"; echo "outfile=$T/b2.json" > "$T/codex.scn"; run_hook "$T"
     rep 0 L-BIGREASON "blocks" "$(bool test "$DEC" = block)"
     rep 0 L-BIGREASON "the reason holds both seats' sections" "$(bool test "$(has "$RSN" "🔍 claude review (round 1)")$(has "$RSN" "🔍 codex review (round 1)")" = 11)"
+    rep 0 L-BIGREASON "the reason holds both full findings" "$(bool test "$(has "$RSN" " — A$big")$(has "$RSN" " — B$big")" = 11)"
     rep 0 L-BIGREASON "round file is 1" "$(bool test "$(rnd "$T")" = 1)"; rm -rf "$T"
   fi
   if sel L-BIGNOTE; then
@@ -963,23 +1001,48 @@ leg_rows() {
     T="$(mkproj)" || exit 2; big="$(head -c 70000 /dev/zero | tr '\0' y)"
     jq -cn --arg s "$big" '{verdict:"approve",summary:$s,findings:[]}' > "$T/a1.json"
     echo "textfile=$T/a1.json" > "$T/claude.scn"; echo "outfile=$T/a1.json" > "$T/codex.scn"; run_hook "$T"
-    rep 0 L-BIGNOTE "release note names both seats" "$(bool test "$(has "$SM" "✅ claude review passed")$(has "$SM" "✅ codex review passed")" = 11)"; rm -rf "$T"
+    rep 0 L-BIGNOTE "release note names both seats" "$(bool test "$(has "$SM" "✅ claude review passed")$(has "$SM" "✅ codex review passed")" = 11)"
+    rep 0 L-BIGNOTE "release note holds both full summaries" "$(bool test "$(has "$SM" "✅ claude review passed: $big | ")$(has "$SM" "✅ codex review passed: $big")" = 11)"; rm -rf "$T"
   fi
   if sel L-DECFAIL; then
-    # Building the block decision fails (a PATH-shadowed jq refuses that one filter):
-    # fail OPEN with a note, and do NOT advance the round.
+    # Building the block decision fails (a PATH-shadowed jq prints part of an answer,
+    # then fails, on that one filter),
+    # after a prior round: fail OPEN with a note, do NOT advance the round, and keep
+    # the prior verdict.json (the new findings were never shown).
     T="$(mkproj)" || exit 2
+    seed_out "$T" '{"verdict":"request_changes","summary":"SEED","findings":[]}'; cp "$(OUTF "$T")" "$T/seed.json"; echo 1 > "$(STATE "$T")/round"
     vfile "$T/blk1.json" request_changes '[{"file":"a.php","line":1,"severity":"major","confidence":5,"message":"bug-one","suggestion":null}]'
     echo "textfile=$T/blk1.json" > "$T/claude.scn"
     cat > "$T/bin/jq" <<'JQSTUB'
 #!/usr/bin/env bash
-for a in "$@"; do case "$a" in *'decision:"block"'*) exit 1 ;; esac; done
+for a in "$@"; do case "$a" in *'decision:"block"'*) printf 'PARTIAL'; exit 1 ;; esac; done
 exec /usr/bin/jq "$@"
 JQSTUB
     chmod +x "$T/bin/jq"; run_hook "$T"
     rep 0 L-DECFAIL "fail-open note" "$(has "$SM" "could not build its decision")"
     rep 0 L-DECFAIL "turn not blocked" "$(bool test -z "$DEC")"
-    rep 0 L-DECFAIL "round not advanced" "$(bool test ! -f "$(STATE "$T")/round")"; rm -rf "$T"
+    rep 0 L-DECFAIL "round not advanced" "$(bool test "$(rnd "$T")" = 1)"
+    rep 0 L-DECFAIL "verdict.json byte-identical" "$(bool cmp -s "$(OUTF "$T")" "$T/seed.json")"; rm -rf "$T"
+  fi
+  if sel L-SECFAIL; then
+    # Rendering one seat's findings fails (a PATH-shadowed jq prints part of an answer,
+    # then fails, on that filter),
+    # after a prior round: the same fail-open as L-DECFAIL, never a block that holds
+    # only the closing line.
+    T="$(mkproj)" || exit 2
+    seed_out "$T" '{"verdict":"request_changes","summary":"SEED","findings":[]}'; cp "$(OUTF "$T")" "$T/seed.json"; echo 1 > "$(STATE "$T")/round"
+    vfile "$T/blk1.json" request_changes '[{"file":"a.php","line":1,"severity":"major","confidence":5,"message":"bug-one","suggestion":null}]'
+    echo "textfile=$T/blk1.json" > "$T/claude.scn"
+    cat > "$T/bin/jq" <<'JQSTUB'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in *'requested changes:'*) printf 'PARTIAL'; exit 1 ;; esac; done
+exec /usr/bin/jq "$@"
+JQSTUB
+    chmod +x "$T/bin/jq"; run_hook "$T"
+    rep 0 L-SECFAIL "fail-open note" "$(has "$SM" "could not build its decision")"
+    rep 0 L-SECFAIL "turn not blocked" "$(bool test -z "$DEC")"
+    rep 0 L-SECFAIL "round not advanced" "$(bool test "$(rnd "$T")" = 1)"
+    rep 0 L-SECFAIL "verdict.json byte-identical" "$(bool cmp -s "$(OUTF "$T")" "$T/seed.json")"; rm -rf "$T"
   fi
   if sel L-TICK; then
     # A 1.1 s tick in every log line (a date shim) at REVIEW_TIMEOUT=30 with only the
@@ -990,7 +1053,12 @@ JQSTUB
     run_hook "$T" REVIEW_TIMEOUT=30
     rep 0 L-TICK "claude ran and passed" "$(has "$SM" "✅ claude review passed")"
     rep 0 L-TICK "codex ran and passed" "$(has "$SM" "✅ codex review passed")"
-    rep 0 L-TICK "no leg skipped as 'no time left'" "$(bool test "$(has "$SM" "no time left")" = 0)"; rm -rf "$T"
+    rep 0 L-TICK "no leg skipped as 'no time left'" "$(bool test "$(has "$SM" "no time left")" = 0)"
+    # Each primary's run limit is exactly its logged share minus the 5 s kill grace;
+    # a clock re-read after the 1.1 s log line would make it smaller.
+    shareof() { sed -n "s/.*via $2 (share \([0123456789]*\)s).*/\1/p" "$(STATE "$1")/review.log" 2>/dev/null | head -1; }
+    rep 0 L-TICK "claude run limit = share - 5" "$(bool test "$(runlimit "$T/timeouts" claude)" = "$(( $(shareof "$T" claude) - 5 ))")"
+    rep 0 L-TICK "codex run limit = share - 5" "$(bool test "$(runlimit "$T/timeouts" codex)" = "$(( $(shareof "$T" codex) - 5 ))")"; rm -rf "$T"
   fi
   if sel L-SAVEFAIL; then
     # Saving the verdict fails (target made a directory → mv fails): the hook must
@@ -1403,12 +1471,18 @@ MVSTUB
     rep 0 L-DOCS "config.sh: new order, REVIEW_TIMEOUT, 540" "$(bool docok "$cfg")"
     # The block rule (both halves), the seat-1 fallback (grok, then agy) and the
     # managed-hooks caveat, as written in both READMEs.
-    docrule() { grep -qF 'returns `request_changes` with a **major/blocker** finding at confidence ≥ `REVIEW_MIN_CONFIDENCE`' "$1" 2>/dev/null \
+    # The block rule names the REVIEW_BLOCK_SEVERITY knob (not the default alone), and
+    # an empty seat 1 promises "only one reviewer ran" only while seat 2 holds a verdict.
+    docrule() { grep -qF 'returns `request_changes` with a finding at or above `REVIEW_BLOCK_SEVERITY` (default **major**: major/blocker) at confidence ≥ `REVIEW_MIN_CONFIDENCE`' "$1" 2>/dev/null \
+                && ! grep -qF 'with a **major/blocker** finding at confidence' "$1" 2>/dev/null \
                 && grep -qF 'grok, then agy, fills seat 1' "$1" 2>/dev/null \
                 && ! grep -qF 'grok fills seat 1' "$1" 2>/dev/null \
+                && grep -qF 'if seat 2 is empty too, the note says no reviewer could run' "$1" 2>/dev/null \
                 && grep -qF 'managed settings' "$1" 2>/dev/null; }
     rep 0 L-DOCS "root README.md: block rule, seat-1 fallback, managed hooks" "$(bool docrule "$rootreadme")"
     rep 0 L-DOCS "review README.md: block rule, seat-1 fallback, managed hooks" "$(bool docrule "$revreadme")"
+    rep 0 L-DOCS "review README.md: finished legs' files are locked (mode 000)" "$(bool grep -qF 'mode 000' "$revreadme")"
+    rep 0 L-DOCS "review README.md: the lock does not hold as root" "$(bool grep -qF 'when the hook runs as root' "$revreadme")"
     rep 0 L-DOCS "no REVIEW_LEGS anywhere" "$(bool test "$(grep -l REVIEW_LEGS "$rootreadme" "$revreadme" "$cfg" "$hook" 2>/dev/null | wc -l)" = 0)"
   fi
 }

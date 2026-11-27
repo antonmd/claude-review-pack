@@ -21,7 +21,7 @@ rebuilt for a **WordPress / PHP / SCSS** codebase (the original is Go-only).
      (your CLAUDE.md rules baked in) are shared by every leg; the schema and a
      one-line reply rule are appended to the prompt (only the codex leg also
      gets `--output-schema`).
-   - If either seat returns `request_changes` with a **major/blocker** finding at confidence ≥ `REVIEW_MIN_CONFIDENCE`,
+   - If either seat returns `request_changes` with a finding at or above `REVIEW_BLOCK_SEVERITY` (default **major**: major/blocker) at confidence ≥ `REVIEW_MIN_CONFIDENCE`,
      the turn is **blocked** and the findings are injected back into
      Claude's context to fix — up to `REVIEW_MAX_ROUNDS` times.
    - Otherwise the turn ends (minor/nit findings are surfaced once, not looped).
@@ -64,9 +64,11 @@ the gate **releases the turn** with a warning that names why each leg was skippe
 It never traps you, and it never overwrites the previous `verdict.json`. Logs:
 `.claude/.review-state/review.log` and the per-leg raw outputs
 `.claude/.review-state/{claude,grok,agy,codex}.{out,err}`. While the turn runs, each
-leg writes those files into a private folder outside the repo (under `$TMPDIR`), so a
-later seat cannot read an earlier seat's answer; they move into
-`.claude/.review-state/` when the hook ends.
+leg writes those files into a private folder outside the repo (under `$TMPDIR`), and
+each finished leg's files are locked (mode 000) before the next leg starts, so a later
+seat, whose tools are read-only, cannot read an earlier seat's answer. The lock relies
+on file modes, so it does not hold when the hook runs as root. The files are unlocked
+and move into `.claude/.review-state/` when the hook ends.
 
 ## Requirements
 
@@ -91,7 +93,7 @@ later seat cannot read an earlier seat's answer; they move into
   `disableAllHooks`; hooks from managed settings can still run there, and
   `REVIEW_DISABLE=1` stops this hook in it). When that login is out of usage it
   fails: then grok, then agy, fills seat 1; if neither can, seat 1 stays empty and
-  the note says only one reviewer ran.
+  the note says only one reviewer ran; if seat 2 is empty too, the note says no reviewer could run.
 - **Leg availability is not probed up front.** A leg that is installed but out
   of quota is discovered by trying it (its budget share is spent before the next
   leg runs); the budget split bounds that cost.
