@@ -882,9 +882,13 @@ leg_rows() {
 
   # ---- L-STATECLR / L-CLRFAIL: the one-time state clear --------------------
   if sel L-STATECLR; then
-    T="$(mkproj)" || exit 2; rm -f "$T/bin/grok"; mkdir -p "$(STATE "$T")"; printf 'junk' > "$(STATE "$T")/grok.err"; printf 'junk' > "$(STATE "$T")/claude.err"; run_hook "$T"
+    # grok and claude are NOT installed here, so neither leg rewrites its own files:
+    # only the one-time clear can remove the stale ones.
+    T="$(mkproj)" || exit 2; rm -f "$T/bin/grok" "$T/bin/claude"; mkdir -p "$(STATE "$T")"
+    printf 'junk' > "$(STATE "$T")/grok.err"; printf 'junk' > "$(STATE "$T")/claude.err"; printf 'junk' > "$(STATE "$T")/claude.out"; run_hook "$T"
     rep 0 L-STATECLR "stale grok.err removed before the loop" "$(bool test ! -e "$(STATE "$T")/grok.err")"
-    rep 0 L-STATECLR "stale claude.err removed before the loop" "$(bool test ! -e "$(STATE "$T")/claude.err" -o "$(cat "$(STATE "$T")/claude.err" 2>/dev/null)" != junk)"; rm -rf "$T"
+    rep 0 L-STATECLR "stale claude.err removed before the loop" "$(bool test ! -e "$(STATE "$T")/claude.err")"
+    rep 0 L-STATECLR "stale claude.out removed before the loop" "$(bool test ! -e "$(STATE "$T")/claude.out")"; rm -rf "$T"
   fi
   if sel L-CLRFAIL; then
     T="$(mkproj)" || exit 2; mkdir -p "$(STATE "$T")/codex.out"
