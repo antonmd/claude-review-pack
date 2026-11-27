@@ -29,5 +29,11 @@ REVIEW_MIN_CONFIDENCE="${REVIEW_MIN_CONFIDENCE:-4}"
 # Per-file content cap sent to Codex (lines). Keeps the prompt bounded.
 REVIEW_MAX_FILE_LINES="${REVIEW_MAX_FILE_LINES:-900}"
 
+# Bash guard (guard-bash.sh): "ask" (default) asks you before a command that
+# looks destructive; "off" never asks (the review loop keeps running). Only the
+# exact value "off" turns it off. Set it per machine, e.g. in the untracked
+# .claude/settings.local.json: {"env": {"REVIEW_GUARD": "off"}}.
+REVIEW_GUARD="${REVIEW_GUARD:-ask}"
+
 # Kill switch: set to 1 to disable the whole loop (review + bash guard).
 REVIEW_DISABLE="${REVIEW_DISABLE:-0}"

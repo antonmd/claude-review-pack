@@ -64,6 +64,7 @@ land in `.claude/.review-state/`.
 | `REVIEW_CODEX_MODEL` | *(codex default)* | Override the Codex model |
 | `REVIEW_CODEX_TIMEOUT` | `300` | Per-review timeout (seconds) |
 | `REVIEW_MAX_FILE_LINES` | `900` | Per-file content cap sent to Codex |
+| `REVIEW_GUARD` | `ask` | Bash guard: `ask` before destructive commands, or `off` to never ask (the review loop still runs). Set per machine, e.g. in the untracked `.claude/settings.local.json`: `{"env": {"REVIEW_GUARD": "off"}}` |
 | `REVIEW_DISABLE` | `0` | Set `1` to disable the loop + bash guard entirely |
 
 Kill switch for one session: `export REVIEW_DISABLE=1`.
