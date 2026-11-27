@@ -967,11 +967,15 @@ leg_rows() {
   if sel L-LEGDIRFAIL; then
     # The private per-turn folder cannot be made (TMPDIR is missing): fail OPEN with
     # a note, call no reviewer, leave verdict.json alone.
+    # The hook runs from a guard folder: whatever else goes wrong, the hook must never
+    # touch the folder it was started in (an empty folder name made absolute is "$PWD/").
     T="$(mkproj)" || exit 2; seed_out "$T" '{"verdict":"approve","summary":"SEED","findings":[]}'; cp "$(OUTF "$T")" "$T/seed.json"
-    run_hook "$T" TMPDIR="$T/no-such-dir"
+    gd="$(mktemp -d -p "$HARNESS_TMP")" || exit 2; echo keep > "$gd/keep" || exit 2
+    pushd "$gd" >/dev/null || exit 2; run_hook "$T" TMPDIR="$T/no-such-dir"; popd >/dev/null || exit 2
     rep 0 L-LEGDIRFAIL "fail-open note" "$(has "$SM" "cannot create its private work folder")"
     rep 0 L-LEGDIRFAIL "no reviewer called" "$(bool test "$(( $(ncalls_safe claude "$T/calls") + $(ncalls_safe grok "$T/calls") + $(ncalls_safe agy "$T/calls") + $(ncalls_safe codex "$T/calls") ))" = 0)"
-    rep 0 L-LEGDIRFAIL "verdict.json byte-identical" "$(bool cmp -s "$(OUTF "$T")" "$T/seed.json")"; rm -rf "$T"
+    rep 0 L-LEGDIRFAIL "the hook's working folder is untouched" "$(bool test "$(cat "$gd/keep" 2>/dev/null)" = keep)"
+    rep 0 L-LEGDIRFAIL "verdict.json byte-identical" "$(bool cmp -s "$(OUTF "$T")" "$T/seed.json")"; rm -rf "$T" "$gd"
   fi
   if sel L-RELTMP; then
     # A relative TMPDIR, the hook started outside the repo: the private folder must

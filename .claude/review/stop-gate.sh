@@ -60,12 +60,15 @@ fi
 # seat cannot read an earlier seat's answer while it reviews. When the hook exits,
 # the files are unlocked and move into the review-state folder (for debugging),
 # and the private folder is removed.
-if ! LEG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/review-legs.XXXXXX" 2>/dev/null)" || [ ! -d "$LEG_DIR" ]; then
+# The base is made absolute BEFORE mktemp (leg_claude changes to the repo root before
+# it writes into the folder), so LEG_DIR is mktemp's own absolute path or empty, and
+# never "$PWD/" — the EXIT trap below removes LEG_DIR.
+leg_base="${TMPDIR:-/tmp}"
+case "$leg_base" in /*) ;; *) leg_base="$PWD/$leg_base" ;; esac
+if ! LEG_DIR="$(mktemp -d "$leg_base/review-legs.XXXXXX" 2>/dev/null)" || [ ! -d "$LEG_DIR" ]; then
     review_log "cannot create the private leg folder; failing open"
     note "⚠️ Second-opinion review cannot create its private work folder — skipping this turn."
 fi
-# Absolute: leg_claude changes to the repo root before it writes into the folder.
-case "$LEG_DIR" in /*) ;; *) LEG_DIR="$PWD/$LEG_DIR" ;; esac
 trap 'chmod 600 "$LEG_DIR"/* 2>/dev/null; mv -f "$LEG_DIR"/* "$STATE_DIR"/ 2>/dev/null; rm -rf "$LEG_DIR"' EXIT
 
 # --- Resolve the time budget (seconds), guarded ------------------------------
