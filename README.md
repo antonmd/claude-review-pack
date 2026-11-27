@@ -47,15 +47,16 @@ On **Stop**, the gate:
    are embedded in the prompt, and the codex leg also gets `--output-schema`).
    All legs share the reviewer instructions in `prompts/codex-review.md`.
    claude, grok and codex run read-only (claude `-p --model opus` with only the
-   `Read,Grep,Glob` tools, no MCP servers and all hooks off, so it cannot start
-   another review; grok via a `read_file,grep,list_dir` tool allowlist + `--deny`;
+   `Read,Grep,Glob` tools, no MCP servers and `disableAllHooks`, with
+   `REVIEW_DISABLE=1` so this hook cannot start another review — hooks from
+   managed settings can still run there; grok via a `read_file,grep,list_dir` tool allowlist + `--deny`;
    codex via `-s read-only`); the agy leg has no read-only mode on the installed
    build, so it runs `--sandbox` (no shell) confined to the repo with
    `--add-dir` — it can still write **inside** that dir (see Known limitations).
    The whole review shares one time budget (`REVIEW_TIMEOUT`, default 540s)
    split across the installed legs, so a hung leg cannot eat the turn.
-4. **Decides**: either seat blocks the turn if its finding is **major/blocker AND
-   confidence ≥ floor**; `verdict.json` holds both seats' findings. Findings are injected back for Claude to fix, up to
+4. **Decides**: either seat blocks the turn when it returns `request_changes` with a **major/blocker** finding at confidence ≥ `REVIEW_MIN_CONFIDENCE`
+   (a seat that approves does not block, whatever it lists); `verdict.json` holds both seats' findings. Findings are injected back for Claude to fix, up to
    `REVIEW_MAX_ROUNDS`. Lower-severity/low-confidence findings are shown once,
    never looped.
 5. **Later rounds are verify-only** — the reviewer checks whether prior findings
@@ -141,7 +142,8 @@ grounding. Grounding tools are optional and degrade gracefully.
   voted, and either seat's blocking finding blocks the turn.
 - **The claude leg uses your Claude login and quota.** It is a nested
   `claude -p` session: it reads your repository, spends your plan usage, and
-  fails (so grok fills seat 1) when that login is out of usage.
+  fails when that login is out of usage: then grok, then agy, fills seat 1; if
+  neither can, seat 1 stays empty and the note says only one reviewer ran.
 - **Leg availability is not probed up front.** An installed-but-out-of-quota leg
   is discovered by trying it; its bounded share of `REVIEW_TIMEOUT` is spent
   before the next leg runs. Each leg's share is the time left divided by the legs

@@ -15,7 +15,7 @@ source "$REVIEW_DIR/lib.sh"
 # Emit a JSON object to Claude Code and exit. $1=json
 emit() { printf '%s\n' "$1"; exit 0; }
 # Surface a non-blocking note to the user, then allow stop.
-note() { emit "$(jq -n --arg m "$1" '{systemMessage:$m}')"; }
+note() { emit "$(printf '%s' "$1" | jq -Rs '{systemMessage:.}')"; }
 
 [ "$REVIEW_DISABLE" = "1" ] && exit 0
 command -v jq >/dev/null 2>&1 || exit 0
@@ -55,6 +55,15 @@ if ! rm -f "$STATE_DIR"/claude.out "$STATE_DIR"/claude.err \
     review_log "cannot clear review state; failing open"
     note "⚠️ Second-opinion review cannot clear review state — skipping this turn."
 fi
+# Raw leg output stays PRIVATE until the turn ends: it is written outside the repo,
+# so a later seat cannot read an earlier seat's answer while it reviews. When the
+# hook exits, the files move into the review-state folder (for debugging) and the
+# private folder is removed.
+if ! LEG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/review-legs.XXXXXX" 2>/dev/null)" || [ ! -d "$LEG_DIR" ]; then
+    review_log "cannot create the private leg folder; failing open"
+    note "⚠️ Second-opinion review cannot create its private work folder — skipping this turn."
+fi
+trap 'mv -f "$LEG_DIR"/* "$STATE_DIR"/ 2>/dev/null; rm -rf "$LEG_DIR"' EXIT
 
 # --- Resolve the time budget (seconds), guarded ------------------------------
 # Accept only 1–4 ASCII digits in 30..540; anything else → 540. The explicit
@@ -172,7 +181,7 @@ parse_one() {    # $1=raw answer text → echoes normalized valid verdict JSON, 
     [ "$rc" -eq 0 ] && printf '%s' "$v"
 }
 
-# --- The three reviewer legs -------------------------------------------------
+# --- The four reviewer legs --------------------------------------------------
 # Each sets LEG_TEXT (raw answer text) and returns 0 on a clean GATE pass, or
 # sets LEG_REASON and returns 1. They write raw stdout/stderr to per-leg files.
 LEG_TEXT=""; LEG_REASON=""
@@ -202,19 +211,19 @@ leg_grok() {
         timeout -k 5 "$secs" grok --prompt-file "$PROMPT" --effort high --always-approve \
             --output-format json --no-subagents --tools read_file,grep,list_dir \
             --disallowed-tools CallMcpTool --deny 'mcp__*' --cwd "$REPO_ROOT" \
-            >"$STATE_DIR/grok.out" 2>"$STATE_DIR/grok.err"
+            >"$LEG_DIR/grok.out" 2>"$LEG_DIR/grok.err"
     rc=$?
     if [ "$rc" -ne 0 ]; then
-        local msg; msg="$(jq -r '.message // empty' "$STATE_DIR/grok.out" 2>/dev/null | collapse_cut)"
+        local msg; msg="$(jq -r '.message // empty' "$LEG_DIR/grok.out" 2>/dev/null | collapse_cut)"
         LEG_REASON="exit $rc"; [ -n "$msg" ] && LEG_REASON="exit $rc: $msg"
         return 1
     fi
-    if ! jq -e . "$STATE_DIR/grok.out" >/dev/null 2>&1; then LEG_REASON="not JSON"; return 1; fi
-    stop="$(jq -r '.stopReason // empty' "$STATE_DIR/grok.out" 2>/dev/null)"
+    if ! jq -e . "$LEG_DIR/grok.out" >/dev/null 2>&1; then LEG_REASON="not JSON"; return 1; fi
+    stop="$(jq -r '.stopReason // empty' "$LEG_DIR/grok.out" 2>/dev/null)"
     [ "$stop" = end_turn ] || { LEG_REASON="stopReason ${stop:-none}"; return 1; }
-    text="$(jq -r '.text // empty' "$STATE_DIR/grok.out" 2>/dev/null)"
+    text="$(jq -r '.text // empty' "$LEG_DIR/grok.out" 2>/dev/null)"
     [ -n "$text" ] || { LEG_REASON="empty text"; return 1; }
-    keys="$(jq -r '.modelUsage // {} | keys | join(",")' "$STATE_DIR/grok.out" 2>/dev/null)"
+    keys="$(jq -r '.modelUsage // {} | keys | join(",")' "$LEG_DIR/grok.out" 2>/dev/null)"
     case "$keys" in
         *,*) LEG_REASON="served '$keys', default '$def'"; return 1 ;;
         "$def"*) : ;;
@@ -245,73 +254,76 @@ leg_agy() {
         | REVIEW_DISABLE=1 timeout -k 5 "$secs" agy --model "$M" --dangerously-skip-permissions \
             --sandbox --print-timeout "${secs}s" --disable-slash-commands --add-dir "$REPO_ROOT" \
             --input-format stream-json --output-format stream-json \
-            >"$STATE_DIR/agy.out" 2>"$STATE_DIR/agy.err"
+            >"$LEG_DIR/agy.out" 2>"$LEG_DIR/agy.err"
     rc=$?
     if [ "$rc" -ne 0 ]; then
-        local e; e="$(jq -r 'select(.event=="result")|.result.error // empty' "$STATE_DIR/agy.out" 2>/dev/null | collapse_cut)"
+        local e; e="$(jq -r 'select(.event=="result")|.result.error // empty' "$LEG_DIR/agy.out" 2>/dev/null | collapse_cut)"
         LEG_REASON="exit $rc"; [ -n "$e" ] && LEG_REASON="exit $rc: $e"
         return 1
     fi
-    status="$(jq -r 'select(.event=="result")|.result.status // empty' "$STATE_DIR/agy.out" 2>/dev/null)"
+    status="$(jq -r 'select(.event=="result")|.result.status // empty' "$LEG_DIR/agy.out" 2>/dev/null)"
     [ "$status" = SUCCESS ] || { LEG_REASON="status not SUCCESS"; return 1; }
-    served="$(jq -r 'select(.event=="init")|.init.model // empty' "$STATE_DIR/agy.out" 2>/dev/null)"
+    served="$(jq -r 'select(.event=="init")|.init.model // empty' "$LEG_DIR/agy.out" 2>/dev/null)"
     [ "$served" = "$M" ] || { LEG_REASON="served model is not $M"; return 1; }
-    resp="$(jq -r 'select(.event=="result")|.result.response // empty' "$STATE_DIR/agy.out" 2>/dev/null)"
+    resp="$(jq -r 'select(.event=="result")|.result.response // empty' "$LEG_DIR/agy.out" 2>/dev/null)"
     [ -n "$resp" ] || { LEG_REASON="empty response"; return 1; }
     LEG_TEXT="$resp"; return 0
 }
 
 leg_codex() {
     local secs rc args
-    secs=$((LEG_DEADLINE - SECONDS - 5))
-    if [ "$secs" -lt 10 ]; then LEG_REASON="no time left"; return 1; fi
+    # No catalogue step: the run limit is the share minus the 5 s kill grace. attempt()
+    # gives claude/codex a share of at least 15 s, so secs is at least 10.
+    secs=$((SHARE - 5))
     args=(exec --skip-git-repo-check -s read-only -C "$REPO_ROOT"
           --output-schema "$REVIEW_DIR/schema.json"
-          --output-last-message "$STATE_DIR/codex.out" --color never)
+          --output-last-message "$LEG_DIR/codex.out" --color never)
     [ -n "$REVIEW_CODEX_MODEL" ] && args+=(-m "$REVIEW_CODEX_MODEL")
     REVIEW_DISABLE=1 timeout -k 5 "$secs" codex "${args[@]}" \
-        <"$PROMPT" >"$STATE_DIR/codex.log" 2>"$STATE_DIR/codex.err"
+        <"$PROMPT" >"$LEG_DIR/codex.log" 2>"$LEG_DIR/codex.err"
     rc=$?
     if [ "$rc" -ne 0 ]; then
-        local e; e="$(head -1 "$STATE_DIR/codex.err" 2>/dev/null | cut -c1-160)"
+        local e; e="$(head -1 "$LEG_DIR/codex.err" 2>/dev/null | cut -c1-160)"
         LEG_REASON="exit $rc"; [ -n "$e" ] && LEG_REASON="exit $rc: $e"
         return 1
     fi
-    [ -s "$STATE_DIR/codex.out" ] || { LEG_REASON="no answer file"; return 1; }
-    LEG_TEXT="$(cat "$STATE_DIR/codex.out")"
+    [ -s "$LEG_DIR/codex.out" ] || { LEG_REASON="no answer file"; return 1; }
+    LEG_TEXT="$(cat "$LEG_DIR/codex.out")"
     return 0
 }
 
 leg_claude() {
     local secs rc e t served
-    secs=$((LEG_DEADLINE - SECONDS - 5))
-    if [ "$secs" -lt 10 ]; then LEG_REASON="no time left"; return 1; fi
-    # Recursion guard: the nested session runs with all hooks off (disableAllHooks),
-    # and REVIEW_DISABLE=1 makes this hook exit at once if one fires anyway.
+    secs=$((SHARE - 5))   # as leg_codex: no catalogue step, share >= 15 s
+    # Recursion guard: the nested session runs with disableAllHooks (hooks from managed
+    # settings can still run), and REVIEW_DISABLE=1 makes THIS hook exit at once.
     # Read-only: Read/Grep/Glob only, no MCP servers, no saved session.
     ( cd "$REPO_ROOT" && REVIEW_DISABLE=1 timeout -k 5 "$secs" claude -p --model opus \
         --output-format json --tools Read,Grep,Glob --permission-mode dontAsk \
         --no-session-persistence --strict-mcp-config --settings '{"disableAllHooks":true}' \
-        <"$PROMPT" >"$STATE_DIR/claude.out" 2>"$STATE_DIR/claude.err" )
+        <"$PROMPT" >"$LEG_DIR/claude.out" 2>"$LEG_DIR/claude.err" )
     rc=$?
     if [ "$rc" -ne 0 ]; then
-        e="$(head -1 "$STATE_DIR/claude.err" 2>/dev/null | collapse_cut)"
+        e="$(head -1 "$LEG_DIR/claude.err" 2>/dev/null | collapse_cut)"
         LEG_REASON="exit $rc"; [ -n "$e" ] && LEG_REASON="exit $rc: $e"
         return 1
     fi
-    if ! jq -e -s 'length == 1 and (.[0] | type == "object")' "$STATE_DIR/claude.out" >/dev/null 2>&1; then
+    if ! jq -e -s 'length == 1 and (.[0] | type == "object")' "$LEG_DIR/claude.out" >/dev/null 2>&1; then
         LEG_REASON="not JSON"; return 1
     fi
-    t="$(jq -r '"\(.type)/\(.subtype)/\(.is_error)"' "$STATE_DIR/claude.out" 2>/dev/null)"
-    [ "$t" = result/success/false ] || { LEG_REASON="result $t"; return 1; }
+    # Typed: is_error must be the boolean false and .result a string.
+    t="$(jq -r 'if .type == "result" and .subtype == "success" and .is_error == false
+                   and (.result | type) == "string" then "ok"
+                else "\(.type)/\(.subtype)/\(.is_error)/\(.result | type)" end' "$LEG_DIR/claude.out" 2>/dev/null)"
+    [ "$t" = ok ] || { LEG_REASON="result $t"; return 1; }
     # Every model that served must be Claude, and one of them Opus.
-    served="$(jq -r '.modelUsage // {} | keys | join(",")' "$STATE_DIR/claude.out" 2>/dev/null)"
+    served="$(jq -r '.modelUsage // {} | keys | join(",")' "$LEG_DIR/claude.out" 2>/dev/null)"
     if ! jq -e '(.modelUsage // {} | keys) as $k
             | all($k[]; startswith("claude-")) and any($k[]; startswith("claude-opus-"))' \
-            "$STATE_DIR/claude.out" >/dev/null 2>&1; then
+            "$LEG_DIR/claude.out" >/dev/null 2>&1; then
         LEG_REASON="served '$served'"; return 1
     fi
-    LEG_TEXT="$(jq -r '.result // empty' "$STATE_DIR/claude.out" 2>/dev/null)"
+    LEG_TEXT="$(jq -r '.result // empty' "$LEG_DIR/claude.out" 2>/dev/null)"
     [ -n "$LEG_TEXT" ] || { LEG_REASON="empty result"; return 1; }
     return 0
 }
@@ -417,8 +429,6 @@ done
 
 if [ "${#blocking[@]}" -gt 0 ]; then
     round=$((round + 1))
-    echo "$round" >"$ROUND_FILE"
-    review_log "round $round: request_changes via $legs — blocking"
     reason=""
     for s in "${blocking[@]}"; do
         sec="$(printf '%s' "${SEAT_V[s]}" | jq -r --arg leg "${SEAT_LEG[s]}" --arg rd "$round" '
@@ -432,7 +442,16 @@ if [ "${#blocking[@]}" -gt 0 ]; then
         reason="${reason:+$reason$'\n\n'}$sec"
     done
     reason="$reason"$'\n\n'"Address the blocker/major items above, then finish. (Round $round of $REVIEW_MAX_ROUNDS.)"
-    emit "$(jq -n --arg r "$reason" '{decision:"block", reason:$r}')"
+    # By stdin: two seats' findings can pass one argument's 128 KiB limit. Build the
+    # decision BEFORE advancing the round; if it cannot be built, fail open.
+    dec="$(printf '%s' "$reason" | jq -Rs '{decision:"block", reason:.}' 2>/dev/null)"
+    if [ -z "$dec" ]; then
+        review_log "cannot build the block decision; failing open"
+        note "⚠️ Second-opinion review could not build its decision — skipping this turn."
+    fi
+    echo "$round" >"$ROUND_FILE"
+    review_log "round $round: request_changes via $legs — blocking"
+    emit "$dec"
 fi
 
 # Approved (or only minor/nit findings) — release the turn.

@@ -163,6 +163,8 @@ scn="$T/$name.scn"
 i=$(cat "$T/.$name.n" 2>/dev/null || echo 0); i=$((i + 1)); printf '%s\n' "$i" > "$T/.$name.n"
 cat > "$T/$name.stdin.$i"
 pwd > "$T/$name.cwd.$i"
+# any claude raw answer file ANYWHERE in the repo when this call starts (seat isolation, L-PRIVATE)
+find "$T" \( -name claude.out -o -name claude.err \) -print > "$T/$name.peek.$i" 2>/dev/null
 
 # the env the hook passed this call
 printf 'REVIEW_DISABLE=%s GROK_CLAUDE_AGENTS_ENABLED=%s GROK_CLAUDE_SKILLS_ENABLED=%s GROK_CLAUDE_MCPS_ENABLED=%s GROK_CLAUDE_HOOKS_ENABLED=%s\n' \
@@ -459,7 +461,7 @@ agy429() {
     { echo "rc=3"; echo "status=ERROR"; echo "errfile=$T/agy429.err"; } > "$T/agy.scn"
 }
 # make the codex RUN fail fast (rc 1, one "codex" call logged). Needed to reach a
-# fallback, because the new order runs codex FIRST and it answers OK by default.
+# fallback for seat 2, because codex answers OK by default.
 codexfail() { echo "rc=1" > "$1/codex.scn"; }
 # make the claude (seat 1) RUN fail fast (rc 1), so seat 1 needs a fallback too.
 claudefail() { echo "rc=1" > "$1/claude.scn"; }
@@ -876,6 +878,20 @@ leg_rows() {
     rep 0 L-STALE3 "round 3 prompt: VERIFY ONLY with round 1's finding" "$(bool test "$(has "$(cat "$S/prompt.txt" 2>/dev/null)" "VERIFY ONLY")$(has "$(cat "$S/prompt.txt" 2>/dev/null)" "r1bug")" = 11)"
     rep 0 L-STALE3 "round 3 returns grok's approval" "$(has "$SM" "grok review passed")"; rm -rf "$T"
   fi
+  if sel L-VERIFY2; then
+    # Round 1: both seats block with distinct findings. Round 2's VERIFY-ONLY prompt
+    # must carry BOTH prior findings, not only the first seat's.
+    T="$(mkproj)" || exit 2; S="$(STATE "$T")"
+    vfile "$T/blk1.json" request_changes '[{"file":"a.php","line":1,"severity":"major","confidence":5,"message":"bug-one","suggestion":null}]'
+    vfile "$T/blk2.json" request_changes '[{"file":"a.php","line":2,"severity":"blocker","confidence":5,"message":"bug-two","suggestion":null}]'
+    echo "textfile=$T/blk1.json" > "$T/claude.scn"; echo "outfile=$T/blk2.json" > "$T/codex.scn"; run_hook "$T"
+    rep 0 L-VERIFY2 "round 1 blocks" "$(bool test "$DEC" = block)"
+    echo "textfile=$T/claude_ok.json" > "$T/claude.scn"; echo "outfile=$T/codex_ok.json" > "$T/codex.scn"; run_hook "$T"
+    p="$(cat "$S/prompt.txt" 2>/dev/null)"
+    rep 0 L-VERIFY2 "round 2 prompt: VERIFY ONLY with bug-one and bug-two" "$(bool test "$(has "$p" "VERIFY ONLY")$(has "$p" bug-one)$(has "$p" bug-two)" = 111)"
+    rep 0 L-VERIFY2 "round 2 codex call got that prompt" "$(bool test "$(has "$(cat "$T/codex.stdin.2" 2>/dev/null)" bug-one)$(has "$(cat "$T/codex.stdin.2" 2>/dev/null)" bug-two)" = 11)"
+    rep 0 L-VERIFY2 "round 2 releases" "$(has "$SM" "codex review passed")"; rm -rf "$T"
+  fi
   if sel L-CODEXSTALE; then
     T="$(mkproj)" || exit 2; mkdir -p "$(STATE "$T")"; printf '{"verdict":"approve","summary":"STALE","findings":[]}' > "$(STATE "$T")/codex.out"
     seed_out "$T" '{"verdict":"approve","summary":"SEED","findings":[]}'; cp "$(OUTF "$T")" "$T/seed.json"
@@ -896,6 +912,16 @@ leg_rows() {
     rep 0 L-STATECLR "stale claude.err removed before the loop" "$(bool test ! -e "$(STATE "$T")/claude.err")"
     rep 0 L-STATECLR "stale claude.out removed before the loop" "$(bool test ! -e "$(STATE "$T")/claude.out")"; rm -rf "$T"
   fi
+  if sel L-PRIVATE; then
+    # Seat isolation: while codex (seat 2) runs, claude's (seat 1) raw answer must
+    # not be ANYWHERE in the repo; the files land in the review-state folder when the
+    # hook ends, and the private per-turn folder (TMPDIR, outside the repo) is removed.
+    T="$(mkproj)" || exit 2; tp="$(mktemp -d -p "$HARNESS_TMP")" || exit 2; run_hook "$T" TMPDIR="$tp"
+    rep 0 L-PRIVATE "codex ran once" "$(bool test "$(ncalls codex "$T/calls")" = 1)"
+    rep 0 L-PRIVATE "at codex's start: no claude.out/claude.err anywhere in the repo" "$(bool test -f "$T/codex.peek.1" -a ! -s "$T/codex.peek.1")"
+    rep 0 L-PRIVATE "after the hook: claude.out and codex.out in the review-state folder" "$(bool test -s "$(STATE "$T")/claude.out" -a -s "$(STATE "$T")/codex.out")"
+    rep 0 L-PRIVATE "the private per-turn folder is removed" "$(bool test -z "$(ls -A "$tp" 2>/dev/null)")"; rm -rf "$T" "$tp"
+  fi
   if sel L-CLRFAIL; then
     T="$(mkproj)" || exit 2; mkdir -p "$(STATE "$T")/codex.out"
     seed_out "$T" '{"verdict":"approve","summary":"SEED","findings":[]}' 2>/dev/null || true
@@ -910,6 +936,61 @@ leg_rows() {
     claudefail "$T"; grok402 "$T"; agy429 "$T"; { echo "rc=124"; echo "outfile=$T/codex_ok.json"; } > "$T/codex.scn"; run_hook "$T"
     rep 0 L-CODEXRC "fail-open note" "$(has "$SM" "No reviewer could run")"
     rep 0 L-CODEXRC "verdict.json byte-identical" "$(bool cmp -s "$(OUTF "$T")" "$T/seed.json")"; rm -rf "$T"
+  fi
+  if sel L-LEGDIRFAIL; then
+    # The private per-turn folder cannot be made (TMPDIR is missing): fail OPEN with
+    # a note, call no reviewer, leave verdict.json alone.
+    T="$(mkproj)" || exit 2; seed_out "$T" '{"verdict":"approve","summary":"SEED","findings":[]}'; cp "$(OUTF "$T")" "$T/seed.json"
+    run_hook "$T" TMPDIR="$T/no-such-dir"
+    rep 0 L-LEGDIRFAIL "fail-open note" "$(has "$SM" "cannot create its private work folder")"
+    rep 0 L-LEGDIRFAIL "no reviewer called" "$(bool test "$(( $(ncalls_safe claude "$T/calls") + $(ncalls_safe grok "$T/calls") + $(ncalls_safe agy "$T/calls") + $(ncalls_safe codex "$T/calls") ))" = 0)"
+    rep 0 L-LEGDIRFAIL "verdict.json byte-identical" "$(bool cmp -s "$(OUTF "$T")" "$T/seed.json")"; rm -rf "$T"
+  fi
+  if sel L-BIGREASON; then
+    # Two blocking seats with ~70 KB findings each: the block reason passes one
+    # argument's 128 KiB limit (MAX_ARG_STRLEN), so it must reach jq by stdin.
+    T="$(mkproj)" || exit 2; big="$(head -c 70000 /dev/zero | tr '\0' x)"
+    jq -cn --arg m "A$big" '{verdict:"request_changes",summary:"s1",findings:[{file:"a.php",line:1,severity:"major",confidence:5,message:$m,suggestion:null}]}' > "$T/b1.json"
+    jq -cn --arg m "B$big" '{verdict:"request_changes",summary:"s2",findings:[{file:"a.php",line:2,severity:"major",confidence:5,message:$m,suggestion:null}]}' > "$T/b2.json"
+    echo "textfile=$T/b1.json" > "$T/claude.scn"; echo "outfile=$T/b2.json" > "$T/codex.scn"; run_hook "$T"
+    rep 0 L-BIGREASON "blocks" "$(bool test "$DEC" = block)"
+    rep 0 L-BIGREASON "the reason holds both seats' sections" "$(bool test "$(has "$RSN" "🔍 claude review (round 1)")$(has "$RSN" "🔍 codex review (round 1)")" = 11)"
+    rep 0 L-BIGREASON "round file is 1" "$(bool test "$(rnd "$T")" = 1)"; rm -rf "$T"
+  fi
+  if sel L-BIGNOTE; then
+    # Two passing seats with ~70 KB summaries each: the release note is too long for
+    # one argument, so it too must reach jq by stdin.
+    T="$(mkproj)" || exit 2; big="$(head -c 70000 /dev/zero | tr '\0' y)"
+    jq -cn --arg s "$big" '{verdict:"approve",summary:$s,findings:[]}' > "$T/a1.json"
+    echo "textfile=$T/a1.json" > "$T/claude.scn"; echo "outfile=$T/a1.json" > "$T/codex.scn"; run_hook "$T"
+    rep 0 L-BIGNOTE "release note names both seats" "$(bool test "$(has "$SM" "✅ claude review passed")$(has "$SM" "✅ codex review passed")" = 11)"; rm -rf "$T"
+  fi
+  if sel L-DECFAIL; then
+    # Building the block decision fails (a PATH-shadowed jq refuses that one filter):
+    # fail OPEN with a note, and do NOT advance the round.
+    T="$(mkproj)" || exit 2
+    vfile "$T/blk1.json" request_changes '[{"file":"a.php","line":1,"severity":"major","confidence":5,"message":"bug-one","suggestion":null}]'
+    echo "textfile=$T/blk1.json" > "$T/claude.scn"
+    cat > "$T/bin/jq" <<'JQSTUB'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in *'decision:"block"'*) exit 1 ;; esac; done
+exec /usr/bin/jq "$@"
+JQSTUB
+    chmod +x "$T/bin/jq"; run_hook "$T"
+    rep 0 L-DECFAIL "fail-open note" "$(has "$SM" "could not build its decision")"
+    rep 0 L-DECFAIL "turn not blocked" "$(bool test -z "$DEC")"
+    rep 0 L-DECFAIL "round not advanced" "$(bool test ! -f "$(STATE "$T")/round")"; rm -rf "$T"
+  fi
+  if sel L-TICK; then
+    # A 1.1 s tick in every log line (a date shim) at REVIEW_TIMEOUT=30 with only the
+    # two primaries: each share is the 15 s floor, so a primary that re-reads the
+    # clock after its log line would skip as "no time left".
+    T="$(mkproj)" || exit 2; rm -f "$T/bin/grok" "$T/bin/agy"
+    printf '#!/usr/bin/env bash\nsleep 1.1\nexec /usr/bin/date "$@"\n' > "$T/bin/date"; chmod +x "$T/bin/date"
+    run_hook "$T" REVIEW_TIMEOUT=30
+    rep 0 L-TICK "claude ran and passed" "$(has "$SM" "✅ claude review passed")"
+    rep 0 L-TICK "codex ran and passed" "$(has "$SM" "✅ codex review passed")"
+    rep 0 L-TICK "no leg skipped as 'no time left'" "$(bool test "$(has "$SM" "no time left")" = 0)"; rm -rf "$T"
   fi
   if sel L-SAVEFAIL; then
     # Saving the verdict fails (target made a directory → mv fails): the hook must
@@ -1165,7 +1246,7 @@ MVSTUB
     rep 0 L-RECURSE "the nested run printed nothing" "$(bool test ! -s "$T/nested.out")"; rm -rf "$T"
   fi
   local cf
-  for cf in rc1 iserror subtype emptyresult sonnet foreign notjson twoobj; do
+  for cf in rc1 iserror subtype emptyresult sonnet foreign notjson twoobj strfalse objresult nomu emptymu; do
     sel "L-CLAUDEFAIL/$cf" || continue
     T="$(mkproj)" || exit 2
     case "$cf" in
@@ -1178,6 +1259,15 @@ MVSTUB
       notjson)     printf 'hello\n' > "$T/nj.txt"; { echo "stdout_file=$T/nj.txt"; } > "$T/claude.scn"; exp="claude: not JSON" ;;
       twoobj)      o='{"type":"result","subtype":"success","is_error":false,"result":"x","modelUsage":{"claude-opus-5-5":{}}}'
                    printf '%s\n%s\n' "$o" "$o" > "$T/two.txt"; echo "stdout_file=$T/two.txt" > "$T/claude.scn"; exp="claude: not JSON" ;;
+      # envelopes whose ONLY fault is a field type or a missing/empty modelUsage
+      strfalse)    jq -cn --rawfile r "$T/claude_ok.json" '{type:"result",subtype:"success",is_error:"false",result:$r,modelUsage:{"claude-opus-5-5":{}}}' > "$T/env.txt"
+                   echo "stdout_file=$T/env.txt" > "$T/claude.scn"; exp="claude: result" ;;
+      objresult)   jq -cn --rawfile r "$T/claude_ok.json" '{type:"result",subtype:"success",is_error:false,result:($r|fromjson),modelUsage:{"claude-opus-5-5":{}}}' > "$T/env.txt"
+                   echo "stdout_file=$T/env.txt" > "$T/claude.scn"; exp="claude: result" ;;
+      nomu)        jq -cn --rawfile r "$T/claude_ok.json" '{type:"result",subtype:"success",is_error:false,result:$r}' > "$T/env.txt"
+                   echo "stdout_file=$T/env.txt" > "$T/claude.scn"; exp="claude: served" ;;
+      emptymu)     jq -cn --rawfile r "$T/claude_ok.json" '{type:"result",subtype:"success",is_error:false,result:$r,modelUsage:{}}' > "$T/env.txt"
+                   echo "stdout_file=$T/env.txt" > "$T/claude.scn"; exp="claude: served" ;;
     esac
     run_hook "$T"
     rep 0 "L-CLAUDEFAIL/$cf" "claude rejected, grok fills seat 1" "$(has "$SM" "✅ grok review passed: ok | ✅ codex review passed: codex-ok")"
@@ -1187,7 +1277,7 @@ MVSTUB
 
   # ---- L-COMBINE/* / L-ONESEAT / L-FILLORDER: the two-seat verdict --------
   local cb
-  for cb in seat1 seat2 both minor; do
+  for cb in seat1 seat2 both minor cross; do
     sel "L-COMBINE/$cb" || continue
     T="$(mkproj)" || exit 2
     vfile "$T/blk1.json" request_changes '[{"file":"a.php","line":1,"severity":"major","confidence":5,"message":"bug-one","suggestion":null}]'
@@ -1197,6 +1287,11 @@ MVSTUB
       seat2) echo "outfile=$T/blk2.json" > "$T/codex.scn" ;;
       both)  echo "textfile=$T/blk1.json" > "$T/claude.scn"; echo "outfile=$T/blk2.json" > "$T/codex.scn" ;;
       minor) vfile "$T/mn.json" request_changes "$F_MINOR5"; echo "textfile=$T/mn.json" > "$T/claude.scn" ;;
+      # seat 1 says request_changes but has only a minor; seat 2 approves with a major:
+      # neither seat has BOTH, so the turn is released (a seat is ranked by its own findings)
+      cross) vfile "$T/mn.json" request_changes "$F_MINOR5"; echo "textfile=$T/mn.json" > "$T/claude.scn"
+             vfile "$T/apmaj.json" approve '[{"file":"a.php","line":3,"severity":"major","confidence":5,"message":"bug-three","suggestion":null}]'
+             echo "outfile=$T/apmaj.json" > "$T/codex.scn" ;;
     esac
     run_hook "$T"
     case "$cb" in
@@ -1209,7 +1304,10 @@ MVSTUB
              rep 0 L-COMBINE/both "one section per seat, claude first" "$(awk -v r="$RSN" 'BEGIN{a=index(r,"🔍 claude review (round 1)"); b=index(r,"🔍 codex review (round 1)"); print (a>0 && b>a)?1:0}')"
              rep 0 L-COMBINE/both "both findings in the reason" "$(bool test "$(has "$RSN" bug-one)$(has "$RSN" bug-two)" = 11)"
              rep 0 L-COMBINE/both "one footer" "$(bool test "$(printf '%s' "$RSN" | grep -c 'then finish')" = 1)"
-             rep 0 L-COMBINE/both "verdict.json holds both findings" "$(bool test "$(jq -c '[.verdict,(.findings|length)]' "$(OUTF "$T")" 2>/dev/null)" = '["request_changes",2]')" ;;
+             rep 0 L-COMBINE/both "verdict.json holds both findings" "$(bool test "$(jq -c '[.verdict,(.findings|length)]' "$(OUTF "$T")" 2>/dev/null)" = '["request_changes",2]')"
+             rep 0 L-COMBINE/both "verdict.json findings: exactly bug-one then bug-two" "$(bool test "$(jq -c '[.findings[].message]' "$(OUTF "$T")" 2>/dev/null)" = '["bug-one","bug-two"]')" ;;
+      cross) rep 0 L-COMBINE/cross "released: no seat has request_changes AND a qualifying finding" "$(bool test -z "$DEC")"
+             rep 0 L-COMBINE/cross "round not advanced" "$(bool test ! -f "$(STATE "$T")/round")" ;;
       minor) rep 0 L-COMBINE/minor "minor only -> released" "$(bool test -z "$DEC")"
              rep 0 L-COMBINE/minor "note: claude passed with 1 minor note, codex passed" "$(bool test "$(has "$SM" "✅ claude review passed (with 1 minor note(s))")$(has "$SM" "✅ codex review passed: codex-ok")" = 11)" ;;
     esac
@@ -1297,6 +1395,14 @@ MVSTUB
     rep 0 L-DOCS "root README.md: new order, REVIEW_TIMEOUT, 540" "$(bool docok "$rootreadme")"
     rep 0 L-DOCS "review README.md: new order, REVIEW_TIMEOUT, 540" "$(bool docok "$revreadme")"
     rep 0 L-DOCS "config.sh: new order, REVIEW_TIMEOUT, 540" "$(bool docok "$cfg")"
+    # The block rule (both halves), the seat-1 fallback (grok, then agy) and the
+    # managed-hooks caveat, as written in both READMEs.
+    docrule() { grep -qF 'returns `request_changes` with a **major/blocker** finding at confidence ≥ `REVIEW_MIN_CONFIDENCE`' "$1" 2>/dev/null \
+                && grep -qF 'grok, then agy, fills seat 1' "$1" 2>/dev/null \
+                && ! grep -qF 'grok fills seat 1' "$1" 2>/dev/null \
+                && grep -qF 'managed settings' "$1" 2>/dev/null; }
+    rep 0 L-DOCS "root README.md: block rule, seat-1 fallback, managed hooks" "$(bool docrule "$rootreadme")"
+    rep 0 L-DOCS "review README.md: block rule, seat-1 fallback, managed hooks" "$(bool docrule "$revreadme")"
     rep 0 L-DOCS "no REVIEW_LEGS anywhere" "$(bool test "$(grep -l REVIEW_LEGS "$rootreadme" "$revreadme" "$cfg" "$hook" 2>/dev/null | wc -l)" = 0)"
   fi
 }

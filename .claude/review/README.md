@@ -21,8 +21,8 @@ rebuilt for a **WordPress / PHP / SCSS** codebase (the original is Go-only).
      (your CLAUDE.md rules baked in) are shared by every leg; the schema and a
      one-line reply rule are appended to the prompt (only the codex leg also
      gets `--output-schema`).
-   - If either seat returns `request_changes` with a **major/blocker**
-     finding, the turn is **blocked** and the findings are injected back into
+   - If either seat returns `request_changes` with a **major/blocker** finding at confidence ≥ `REVIEW_MIN_CONFIDENCE`,
+     the turn is **blocked** and the findings are injected back into
      Claude's context to fix — up to `REVIEW_MAX_ROUNDS` times.
    - Otherwise the turn ends (minor/nit findings are surfaced once, not looped).
 
@@ -63,7 +63,10 @@ out of quota, timed out, erroring, or returning an unparseable/ill-shaped answer
 the gate **releases the turn** with a warning that names why each leg was skipped.
 It never traps you, and it never overwrites the previous `verdict.json`. Logs:
 `.claude/.review-state/review.log` and the per-leg raw outputs
-`.claude/.review-state/{claude,grok,agy,codex}.{out,err}`.
+`.claude/.review-state/{claude,grok,agy,codex}.{out,err}`. While the turn runs, each
+leg writes those files into a private folder outside the repo (under `$TMPDIR`), so a
+later seat cannot read an earlier seat's answer; they move into
+`.claude/.review-state/` when the hook ends.
 
 ## Requirements
 
@@ -84,8 +87,11 @@ It never traps you, and it never overwrites the previous `verdict.json`. Logs:
 - **Two seats, not four votes.** At most two verdicts count per round; the
   legs are not compared or voted, and either seat's blocking finding blocks.
 - **The claude leg uses your Claude login and quota** (a nested `claude -p
-  --model opus` session with only `Read,Grep,Glob`, no MCP servers and all hooks
-  off). When that login is out of usage it fails and grok fills seat 1.
+  --model opus` session with only `Read,Grep,Glob`, no MCP servers and
+  `disableAllHooks`; hooks from managed settings can still run there, and
+  `REVIEW_DISABLE=1` stops this hook in it). When that login is out of usage it
+  fails: then grok, then agy, fills seat 1; if neither can, seat 1 stays empty and
+  the note says only one reviewer ran.
 - **Leg availability is not probed up front.** A leg that is installed but out
   of quota is discovered by trying it (its budget share is spent before the next
   leg runs); the budget split bounds that cost.
