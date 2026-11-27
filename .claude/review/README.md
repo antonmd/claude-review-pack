@@ -34,6 +34,7 @@ diversity is the point: it catches things one model misses.
 | `REVIEW_CODEX_TIMEOUT` | 300 | Per-review timeout (s) |
 | `REVIEW_BLOCK_SEVERITY` | major | Min severity that blocks the turn |
 | `REVIEW_MAX_FILE_LINES` | 900 | Per-file content cap sent to Codex |
+| `REVIEW_GUARD` | ask | Bash guard: `ask` before destructive commands, or `off` to never ask (the loop still runs); e.g. `{"env": {"REVIEW_GUARD": "off"}}` in the untracked `.claude/settings.local.json` |
 | `REVIEW_DISABLE` | 0 | Set `1` to disable the loop entirely |
 
 Kill switch for one session: `export REVIEW_DISABLE=1`.

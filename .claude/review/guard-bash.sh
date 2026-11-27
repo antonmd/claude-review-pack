@@ -33,6 +33,9 @@ ask() {
 }
 
 [ "${REVIEW_DISABLE:-0}" = "1" ] && allow
+# REVIEW_GUARD=off: the operator chose never to be asked here (only the exact
+# value "off"; anything else keeps the default "ask").
+[ "${REVIEW_GUARD:-ask}" = "off" ] && allow
 command -v jq >/dev/null 2>&1 || allow   # no jq → can't parse → fail-safe allow
 
 payload="$(cat 2>/dev/null)" || allow
