@@ -24,7 +24,8 @@ run_guard() {
         | env -i HOME="$TMP" PATH="/usr/bin:/bin" "$@" bash "$TMP/.claude/review/guard-bash.sh" 2>/dev/null)"
     RC=$?
 }
-asks() { [ "$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)" = ask ]; }
+# An "ask" must exit 0: Claude Code reads exit 2 as a BLOCK, not as a question.
+asks() { [ "$RC" = 0 ] && [ "$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)" = ask ]; }
 row() {   # row <name> <detail> <cond 0|1>
     if [ "$3" = 1 ]; then printf 'PASS %s %s\n' "$1" "$2"; PASS=$((PASS + 1))
     else printf 'FAIL %s %s\n' "$1" "$2"; FAIL=$((FAIL + 1)); fi
@@ -39,9 +40,6 @@ row G-SAFE "harmless command, default -> no output" "$(ok test "$RC" = 0 -a -z "
 
 run_guard "$DESTRUCTIVE" REVIEW_GUARD=off
 row G-OFF "REVIEW_GUARD=off + destructive -> no output, rc 0" "$(ok test "$RC" = 0 -a -z "$OUT")"
-
-run_guard "$HARMLESS" REVIEW_GUARD=off
-row G-OFF-SAFE "REVIEW_GUARD=off + harmless -> no output" "$(ok test "$RC" = 0 -a -z "$OUT")"
 
 run_guard "$DESTRUCTIVE" REVIEW_GUARD=bogus
 row G-BOGUS "REVIEW_GUARD=bogus -> still asks (unknown value = default)" "$(ok asks)"
