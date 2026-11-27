@@ -350,6 +350,11 @@ run_hook() {
     else
         SM="__BADJSON__"; DEC="__BADJSON__"; RSN="__BADJSON__"
     fi
+    # The hook blocks ONLY through the JSON "decision" and always exits 0. A Stop
+    # hook that exits 2 is itself a block in Claude Code, so a fail-open row that
+    # checked only DEC would pass a hook that warns and then traps the turn. Every
+    # run checks it here (reported only when wrong, to keep the log readable).
+    [ "$HOOK_RC" = 0 ] || rep 0 L-HOOKRC "hook exited $HOOK_RC, not 0 (exit 2 blocks the Stop event)" 0
 }
 STATE() { printf '%s' "$1/.claude/.review-state"; }   # STATE <T>
 OUTF()  { printf '%s' "$1/.claude/.review-state/verdict.json"; }
@@ -796,6 +801,7 @@ leg_rows() {
     claudefail "$T"; grok402 "$T"; agy429 "$T"; echo "rc=1" > "$T/codex.scn"; run_hook "$T"
     rep 0 L-ALLFAIL "one fail-open note naming all four (claude first)" "$(bool test "$(has "$SM" "No reviewer could run (claude:")$(has "$SM" "codex:")$(has "$SM" "grok:")$(has "$SM" "agy:")$(has "$SM" "skipping this turn.")" = 11111)"
     rep 0 L-ALLFAIL "no decision" "$(bool test -z "$DEC")"
+    rep 0 L-ALLFAIL "hook exit code 0 (fail-open, not exit 2)" "$(bool test "$HOOK_RC" = 0)"
     rep 0 L-ALLFAIL "verdict.json unchanged" "$(bool cmp -s "$(OUTF "$T")" "$T/seed.json")"; rm -rf "$T"
   fi
   if sel L-NOGROK; then
