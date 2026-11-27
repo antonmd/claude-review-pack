@@ -1211,10 +1211,16 @@ MVSTUB
   fi
   if sel L-CODEXARGV; then
     # codex is seat 2: claude answers seat 1, then codex runs once.
-    T="$(mkproj)" || exit 2; run_hook "$T"; r="$(runargv codex "$T/calls")"; S="$(STATE "$T")"
-    exp="$(printf 'codex\texec\t--skip-git-repo-check\t-s\tread-only\t-C\t%s\t--output-schema\t%s/.claude/review/schema.json\t--output-last-message\t%s/codex.out\t--color\tnever' "$T" "$T" "$S")"
-    rep 0 L-CODEXARGV "codex argv is exact (no -m)" "$(bool test "$r" = "$exp")"
-    rep 0 L-CODEXARGV "codex stdin is the prompt" "$(bool cmp -s "$T/codex.stdin.1" "$S/prompt.txt")"; rm -rf "$T"
+    # Its answer file is in the private per-turn folder under TMPDIR (outside the repo),
+    # whose name has a random 6-character suffix: check the argv around it exactly.
+    T="$(mkproj)" || exit 2; tp="$(mktemp -d -p "$HARNESS_TMP")" || exit 2
+    run_hook "$T" TMPDIR="$tp"; r="$(runargv codex "$T/calls")"; S="$(STATE "$T")"
+    pre="$(printf 'codex\texec\t--skip-git-repo-check\t-s\tread-only\t-C\t%s\t--output-schema\t%s/.claude/review/schema.json\t--output-last-message\t' "$T" "$T")"
+    post="$(printf '/codex.out\t--color\tnever')"
+    mid=""; [[ "$r" == "$pre"*"$post" ]] && { mid="${r#"$pre"}"; mid="${mid%"$post"}"; }
+    argok=0; case "$mid" in "$tp"/review-legs.??????) argok=1 ;; esac
+    rep 0 L-CODEXARGV "codex argv is exact (no -m; -o in the private folder under TMPDIR)" "$argok"
+    rep 0 L-CODEXARGV "codex stdin is the prompt" "$(bool cmp -s "$T/codex.stdin.1" "$S/prompt.txt")"; rm -rf "$T" "$tp"
   fi
   if sel L-DISABLE; then
     # claude + codex down, grok 402, agy 429, so every leg is actually invoked and
