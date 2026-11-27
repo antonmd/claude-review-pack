@@ -77,6 +77,17 @@ reviewable_path() {
     esac
 }
 
+# jq filter defining `valid_verdict`: true iff the value is exactly our review
+# schema shape (schema.json). Ported verbatim from the frozen parser prototype
+# proto/p14.sh — keep these two in lockstep. `keys` is sorted, so the key arrays
+# are the sorted forms.
+# shellcheck disable=SC2034  # used by stop-gate.sh, which sources this file
+VALID_VERDICT='def valid_verdict: type == "object" and keys == ["findings","summary","verdict"] and (.verdict|IN("approve","request_changes"))
+  and (.summary|type=="string") and (.findings|type=="array")
+  and all(.findings[]; type=="object" and keys == ["confidence","file","line","message","severity","suggestion"]
+    and (.file|type=="string") and (.line==null or (.line|type=="number" and .==floor)) and (.severity|IN("blocker","major","minor","nit"))
+    and (.confidence|type=="number" and .==floor and .>=1 and .<=5) and (.message|type=="string") and (.suggestion==null or (.suggestion|type=="string")));'
+
 # Numeric rank for a severity so we can compare against REVIEW_BLOCK_SEVERITY.
 severity_rank() {
     case "$1" in
